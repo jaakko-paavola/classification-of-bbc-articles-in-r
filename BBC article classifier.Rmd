@@ -1,0 +1,377 @@
+---
+title: "Classification of BBC articles"
+author: "Jaakko Paavola"
+date: "13 Jul 2017"
+output:
+  html_document:
+    toc: true
+    toc_depth: '3'
+    df_print: paged
+  html_notebook:
+    pandoc_args: "--number-offset=1,0"
+    fig_caption: true
+    number_sections: true
+    toc: true
+    toc_depth: 3
+header-includes:
+- \usepackage{fontspec}
+- \usepackage{amsmath}
+- \usepackage{calligra}
+- \usepackage{amsmath}
+- \defaultfontfeatures[\rmfamily,\sffamily]{Ligatures=TeX,Numbers=OldStyle}
+- \setmainfont{Libertinus Serif}
+- \setsansfont{Libertinus Sans}
+- \setmathfont{Libertinus Math}%[RawFeature={+ss08}
+- \setmonofont{Libertinus Mono}
+- \usepackage{eurosym}
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r}
+install.packages("SnowballC", repos = "http://cran.us.r-project.org")
+install.packages("Matrix", repos = "http://cran.us.r-project.org")
+install.packages("ggplot2", repos = "http://cran.us.r-project.org")
+install.packages("quanteda", repos = "http://cran.us.r-project.org")
+install.packages("tau", repos = "http://cran.us.r-project.org")
+install.packages("topicmodels", repos = "http://cran.us.r-project.org")
+install.packages("tidytext", repos = "http://cran.us.r-project.org")
+install.packages("dplyr", repos = "http://cran.us.r-project.org")
+install.packages("tidyr", repos = "http://cran.us.r-project.org")
+install.packages("stringr", repos = "http://cran.us.r-project.org")
+install.packages("tm", repos = "http://cran.us.r-project.org")
+install.packages("readtext", repos = "http://cran.us.r-project.org")
+install.packages("caret", repos = "http://cran.us.r-project.org")
+install.packages("neuralnet", repos = "http://cran.us.r-project.org")
+install.packages("rpart", repos = "http://cran.us.r-project.org")
+install.packages("e1071", repos = "http://cran.us.r-project.org")
+install.packages("class", repos = "http://cran.us.r-project.org")
+install.packages("RTextTools", repos = "http://cran.us.r-project.org")
+```
+
+```{r}
+library(class)
+library(e1071)
+library(rpart)
+library(neuralnet)
+library(tidyr)
+library(dplyr)
+library(tidytext)
+library(topicmodels)
+library(ggplot2)
+library(Matrix)
+library(SnowballC)
+library(RTextTools)
+library(quanteda)
+library(tau)
+library(tm) 
+library(stringr)
+library(quanteda)
+library(readtext)
+library(caret)
+```
+
+```{r}
+categories.factor <- factor(x = c("business", "entertainment", "politics", "sport", "tech"))
+bbcData <- readLines("bbc_articles_labels_all.csv")
+bbcData <- str_split_fixed(bbcData[2:length(bbcData)], ",", 2)
+```
+
+```{r}
+# Making indices for training and test datasets:
+    set.seed(9999)
+    #ind <- sample(c(1, 2), nrow(bbcData), replace = T, prob = c(0.7, 0.3))
+    bbcData.trainingIndex <- sample(nrow(bbcData), ceiling(nrow(bbcData) * 0.7))
+    bbcData.testingIndex <- (1:nrow(bbcData))[-bbcData.trainingIndex]
+    #bbcData[bbcData.trainingIndex, 1].Numerical <- sapply(bbcData[bbcData.testingIndex, 1], function(x) { which(categories.factor == x) })
+
+# Making a corpus and bag of words using tm package:
+    bbcData_Corpus <- Corpus(VectorSource(bbcData[,2]))
+    bbcDataLowerC_Corpus <- tm_map(bbcData_Corpus, content_transformer(tolower))
+    bbcDataLowerCRemPunct_Corpus <- tm_map(bbcDataLowerC_Corpus, removePunctuation)
+    bbcDataLowerCRemPunctRemNum_Corpus <- tm_map(bbcDataLowerCRemPunct_Corpus, removeNumbers)
+    bbcDataLowerCRemPunctRemNumRemWhitesp_Corpus <- tm_map(bbcDataLowerCRemPunctRemNum_Corpus, stripWhitespace)
+    bbcDataLowerCRemPunctRemNumRemWhitespStem.Corpus <- tm_map(bbcDataLowerCRemPunctRemNumRemWhitesp_Corpus, stemDocument, language = "english")
+    bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus <- tm_map(bbcDataLowerCRemPunctRemNumRemWhitespStem.Corpus, removeWords, c(stopwords('english'), "said", "will", "year", "also", "last", "new", "one", "can"))
+    bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.bagsOfWords <- sapply(sapply(bbcDataLowerCRemPunctRemNumRemWhitespRemStopWStem.Corpus, "[", 1), str_split, " ")
+```
+
+```{r}
+# Feature extraction:
+
+    # 1st set of features: Summary statistics
+        # Generate features:
+        bbcData.stats <- data.frame("WordCount" = ntoken(corpus(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus)))
+        bbcData.stats["UniqueWords"] <- ntype(corpus(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus))
+        bbcData.stats["MeanWordLength"] <- sapply(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.bagsOfWords, function(x) { mean(nchar(x)) })
+        bbcData.stats["MeanUnigramFreq"] <- sapply(sapply(corpus(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus)$documents$texts, dfm, ngrams = 1, groups = "texts", verbose = F), Matrix::rowMeans)
+        bbcData.stats["MeanBigramFreq"] <- sapply(sapply(corpus(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus)$documents$texts, dfm, ngrams = 2, groups = "texts", verbose = F), Matrix::rowMeans)
+
+    # 2nd set of features: Document-Term Matrices with term frequency and tfIdf weights (dtm's are used to create unigrams only)
+        # Generate features:
+        bbcData.dtm <- DocumentTermMatrix(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus)
+        bbcData.dtm.tfIdf <- DocumentTermMatrix(bbcDataLowerCRemPunctRemNumRemWhitespStemRemStopW.Corpus, control = list(weighting = function(x) weightTfIdf(x, normalize = T)))
+        # Subset training and testing datasets from a dense matrix:
+        bbcData.dtm.sparse <- removeSparseTerms(bbcData.dtm, 0.95)
+        bbcData.dtm.tfIdf.sparse <- removeSparseTerms(bbcData.dtm, 0.95)
+
+        bbcData.dtm.trainingData <- bbcData.dtm.sparse[bbcData.trainingIndex,]
+        bbcData.dtm.testingData <- bbcData.dtm.sparse[bbcData.testingIndex,]
+        bbcData.dtm.tfIdf.trainingData <- bbcData.dtm.tfIdf.sparse[bbcData.trainingIndex,]
+        bbcData.dtm.tfIdf.testingData <- bbcData.dtm.tfIdf.sparse[bbcData.testingIndex,]
+
+    # LDA (used to add more summary statistics: "per document per topic" probabilities)
+        bbcData.lda.model <- LDA(bbcData.dtm, k = 5, control = list(seed = 1234))
+        bbcData.lda.model.perTopicPerWord <- tidy(bbcData.lda.model, matrix = "beta")
+        bbcData_top_terms <- bbcData.lda.model.perTopicPerWord %>%
+            group_by(topic) %>%
+            top_n(20, beta) %>%
+            ungroup() %>%
+            arrange(topic, -beta)
+        bbcData_top_terms %>% mutate(term = reorder(term, beta)) %>%
+            ggplot(aes(term, beta, fill = factor(topic))) +
+            geom_col(show.legend = FALSE) +
+            facet_wrap(~topic, scales = "free") +
+            coord_flip()
+        bbcData.lda.model.perDocumentPerTopic <- tidy(bbcData.lda.model, matrix = "gamma")
+        bbcData.lda.gamma <- bbcData.lda.model.perDocumentPerTopic %>% mutate(topic = paste0("topic", topic)) %>% spread(topic, gamma) %>% mutate(document = as.integer(document)) %>% arrange(document)
+        bbcData.stats["topic1"] <- bbcData.lda.gamma$topic1
+        bbcData.stats["topic2"] <- bbcData.lda.gamma$topic2
+        bbcData.stats["topic3"] <- bbcData.lda.gamma$topic3
+        bbcData.stats["topic4"] <- bbcData.lda.gamma$topic4
+        bbcData.stats["topic5"] <- bbcData.lda.gamma$topic5
+        # Scaling and subsetting training and testing datasets out of summary statistics:
+        bbcData.stats.trainingData <- scale(bbcData.stats[bbcData.trainingIndex,]) #, !(names(bbcData.stats) %in% c("Category"))])
+        bbcData.stats.testingData <- scale(bbcData.stats[bbcData.testingIndex,]) #, !(names(bbcData.stats) %in% c("Category"))])
+
+    # 3rd set of features: Principal components of summary statistics
+        bbcData.stats.prComp.model <- prcomp(bbcData.stats[bbcData.trainingIndex,], scale. = T)
+        bbcData.stats.trainingData.prComp <- as.data.frame(bbcData.stats.prComp.model$x)
+        bbcData.stats.testingData.prComp <- as.data.frame(predict(bbcData.stats.prComp.model, newdata = bbcData.stats[bbcData.testingIndex,]))
+
+    # 4th set of features: Document-Feature Matrices with term frequency and tfIdf weights (dfm's are used to create unigrams and bigrams):
+        bbcData.corpus <- corpus(readtext("C:\\Users\\jaakko.paavola\\OneDrive - Accenture\\Training\\Data Science 6 Course Series\\Classification and Clustering\\Course_2_Exercise\\bbc_articles_labels_all.csv", text_field = 'text'))
+        bbcData[bbcData.testingIndex, 1] <- docvars(bbcData.corpus)$category
+        # bbcData[bbcData.testingIndex, 1]numerical <- sapply(bbcData[bbcData.testingIndex, 1], function(x) { which(x == categories.factor ) })
+
+        bbcData.dfm.unigrams.trainingData <- dfm(corpus_subset(bbcData.corpus, subset = sapply(1:nrow(bbcData.corpus$documents), function(x) { any(x == bbcData.trainingIndex) })), remove_numbers = T, remove_punct = T, remove_separators = T, remove_twitter = T, remove = c(stopwords('english'), "said", "will", "year", "also", "last", "new", "one", "can"), stem = T)
+        bbcData.dfm.bigrams.trainingData <- dfm(corpus_subset(bbcData.corpus, subset = sapply(1:nrow(bbcData.corpus$documents), function(x) { any(x == bbcData.trainingIndex) })), remove_numbers = T, remove_punct = T, remove_separators = T, remove_twitter = T, remove = c(stopwords('english'), "said", "will", "year", "also", "last", "new", "one", "can"), stem = T, ngrams = 2)
+        bbcData.dfm.unigrams.testingData <- dfm(corpus_subset(bbcData.corpus, subset = sapply(1:nrow(bbcData.corpus$documents), function(x) { any(x == bbcData.testingIndex) })), remove_numbers = T, remove_punct = T, remove_separators = T, remove_twitter = T, remove = c(stopwords('english'), "said", "will", "year", "also", "last", "new", "one", "can"), stem = T)
+        bbcData.dfm.bigrams.testingData <- dfm(corpus_subset(bbcData.corpus, subset = sapply(1:nrow(bbcData.corpus$documents), function(x) { any(x == bbcData.testingIndex) })), remove_numbers = T, remove_punct = T, remove_separators = T, remove_twitter = T, remove = c(stopwords('english'), "said", "will", "year", "also", "last", "new", "one", "can"), stem = T, ngrams = 2)
+    
+        bbcData.dfm.unigrams.trainingData <- dfm_trim(bbcData.dfm.unigrams.trainingData, min_docfreq = 50)
+        bbcData.dfm.unigrams.testingData <- dfm_select(bbcData.dfm.unigrams.testingData, bbcData.dfm.unigrams.trainingData)
+
+        bbcData.dfm.unigrams.trainingData.tfidf <- dfm_trim(tfidf(bbcData.dfm.unigrams.trainingData, normalize = T), min_docfreq = 50)
+        bbcData.dfm.unigrams.testingData.tfidf <- dfm_select(bbcData.dfm.unigrams.testingData, bbcData.dfm.unigrams.trainingData.tfidf)
+
+        bbcData.dfm.bigrams.trainingData <- dfm_trim(bbcData.dfm.bigrams.trainingData, min_docfreq = 50)
+        bbcData.dfm.bigrams.testingData <- dfm_select(bbcData.dfm.bigrams.testingData, bbcData.dfm.bigrams.trainingData)
+
+        bbcData.dfm.bigrams.trainingData.tfidf <- dfm_trim(tfidf(bbcData.dfm.bigrams.trainingData, normalize = T), min_docfreq = 50)
+        bbcData.dfm.bigrams.testingData.tfidf <- dfm_select(bbcData.dfm.bigrams.testingData, bbcData.dfm.bigrams.trainingData.tfidf)
+```
+
+```{r}
+# Train and predict different models
+
+# Naive Bayes:
+    # 1) Summary statistics: -
+    # 2) Document-term matrices: -
+    # 3) Principal components of summary statistics: -
+    # 4) Document-feature matrices:
+        # a) Unigrams
+            # a.1) Term frequency
+                bbcData.naiveBayes.model <- textmodel_NB(bbcData.dfm.unigrams.trainingData, bbcData[bbcData.testingIndex, 1])
+                bbcData.naiveBayes.prediction <- predict(bbcData.naiveBayes.model, newdata = bbcData.dfm.unigrams.testingData)
+                confusionMatrix(bbcData.naiveBayes.prediction$nb.predicted, bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.naiveBayes.model <- textmodel_NB(bbcData.dfm.unigrams.trainingData.tfidf, bbcData[bbcData.testingIndex, 1])
+                bbcData.naiveBayes.prediction <- predict(bbcData.naiveBayes.model, newdata = bbcData.dfm.unigrams.testingData.tfidf)
+                confusionMatrix(bbcData.naiveBayes.prediction$nb.predicted, bbcData[bbcData.testingIndex, 1])
+        # b) Bigrams
+            # a.1) Term frequency
+                bbcData.naiveBayes.model <- textmodel_NB(bbcData.dfm.bigrams.trainingData, bbcData[bbcData.testingIndex, 1])
+                bbcData.naiveBayes.prediction <- predict(bbcData.naiveBayes.model, newdata = bbcData.dfm.bigrams.testingData)
+                confusionMatrix(bbcData.naiveBayes.prediction$nb.predicted, bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.naiveBayes.model <- textmodel_NB(bbcData.dfm.bigrams.trainingData.tfidf, bbcData[bbcData.testingIndex, 1])
+                bbcData.naiveBayes.prediction <- predict(bbcData.naiveBayes.model, newdata = bbcData.dfm.bigrams.testingData.tfidf)
+                confusionMatrix(bbcData.naiveBayes.prediction$nb.predicted, bbcData[bbcData.testingIndex, 1])
+
+# K-nearest neighbors prediction:
+    # 1) Summary statistics:
+        bbcData.stats.testingData.knn.prediction <- knn(bbcData.stats.trainingData, bbcData.stats.testingData, bbcData[bbcData.trainingIndex, 1])
+        confusionMatrix(bbcData.stats.testingData.knn.prediction, bbcData[bbcData.testingIndex, 1])
+    # 2) Document-term matrices:
+        # a) Term frequency weighting:
+            bbcData.dtm.knn.prediction <- knn(bbcData.dtm.trainingData, bbcData.dtm.testingData, bbcData[bbcData.trainingIndex, 1])
+            confusionMatrix(bbcData.dtm.knn.prediction, bbcData[bbcData.testingIndex, 1])
+        # b) TfIdf weighting:
+            bbcData.dtm.tfIdf.prediction.knn <- knn(bbcData.dtm.tfIdf.trainingData, bbcData.dtm.tfIdf.testingData, bbcData[bbcData.trainingIndex, 1])
+            confusionMatrix(bbcData.dtm.tfIdf.prediction.knn, bbcData[bbcData.testingIndex, 1])
+    # 3) Principal components of summary statistics:
+            bbcData.stats.testingData.prComp.knn.prediction <- knn(bbcData.stats.trainingData.prComp[, 1:5], bbcData.stats.testingData.prComp[, 1:5], bbcData[bbcData.trainingIndex, 1])
+            confusionMatrix(bbcData.stats.testingData.prComp.knn.prediction, bbcData[bbcData.testingIndex, 1])
+    # 4) Document-feature matrices:
+        #a) Unigrams
+            #a.1) Term frequency
+                bbcData.dfm.knn.prediction <- knn(bbcData.dfm.unigrams.trainingData, bbcData.dfm.unigrams.testingData, bbcData[bbcData.testingIndex, 1])
+                confusionMatrix(bbcData.dfm.knn.prediction, bbcData[bbcData.testingIndex, 1])
+            #a.2) TfIdf
+                bbcData.dfm.knn.prediction <- knn(bbcData.dfm.unigrams.trainingData.tfidf, bbcData.dfm.unigrams.testingData.tfidf, bbcData[bbcData.testingIndex, 1])
+                confusionMatrix(bbcData.dfm.knn.prediction, bbcData[bbcData.testingIndex, 1])
+        #b) Bigrams
+            #a.1) Term frequency
+                bbcData.dfm.knn.prediction <- knn(bbcData.dfm.bigrams.trainingData, bbcData.dfm.bigrams.testingData, bbcData[bbcData.testingIndex, 1])
+                confusionMatrix(bbcData.dfm.knn.prediction, bbcData[bbcData.testingIndex, 1])
+            #a.2) TfIdf
+                bbcData.dfm.knn.prediction <- knn(bbcData.dfm.bigrams.trainingData.tfidf, bbcData.dfm.bigrams.testingData.tfidf, bbcData[bbcData.testingIndex, 1])
+                confusionMatrix(bbcData.dfm.knn.prediction, bbcData[bbcData.testingIndex, 1][bbcData.testingIndex])
+
+# Support vector machines
+    # 1) Summary statistics:
+        bbcData.stats.svm.model <- svm(Category ~ ., data = data.frame(bbcData.stats.trainingData, Category = bbcData[bbcData.trainingIndex, 1]), cost = 100, gamma = 1)
+        bbcData.stats.svm.prediction <- predict(bbcData.stats.svm.model, bbcData.stats.testingData)
+        confusionMatrix(bbcData.stats.svm.prediction, bbcData[bbcData.testingIndex, 1])
+    # 2) Document-term matrices:
+        # a) Term frequency weighting:
+            bbcData.dtm.svm.model <- svm(x = bbcData.dtm.trainingData, y = factor(bbcData[bbcData.trainingIndex, 1]))
+            bbcData.dtm.svm.prediction <- predict(bbcData.dtm.svm.model, bbcData.dtm.testingData)
+            confusionMatrix(bbcData.dtm.svm.prediction, bbcData[bbcData.testingIndex, 1])
+        # b) TfIdf weighting:
+            bbcData.dtm.tfIdf.svm.model <- svm(x = bbcData.dtm.tfIdf.trainingData, y = factor(bbcData[bbcData.trainingIndex, 1]))
+            bbcData.dtm.tfIdf.svm.prediction <- predict(bbcData.dtm.tfIdf.svm.model, bbcData.dtm.tfIdf.testingData)
+            confusionMatrix(bbcData.dtm.tfIdf.svm.prediction, bbcData[bbcData.testingIndex, 1])
+    # 3) Principal components of summary statistics:
+            bbcData.stats.prComp.svm.model <- svm(Category ~ ., data = data.frame(bbcData.stats.trainingData.prComp, Category = bbcData[bbcData.trainingIndex, 1]))
+            bbcData.stats.prComp.svm.prediction <- predict(bbcData.stats.prComp.svm.model, bbcData.stats.testingData.prComp)
+            confusionMatrix(bbcData.stats.prComp.svm.prediction, bbcData[bbcData.testingIndex, 1])
+    # 4) Document feature matrices:
+        # a) Unigrams
+            # a.1) Term frequency
+                bbcData.dfm.unigrams.svm.model <- svm(x = bbcData.dfm.unigrams.trainingData, y = factor(bbcData[bbcData.testingIndex, 1]))
+                bbcData.dfm.unigrams.svm.prediction <- predict(bbcData.dfm.unigrams.svm.model, bbcData.dfm.unigrams.testingData)
+                confusionMatrix(bbcData.dfm.unigrams.svm.prediction, bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.dfm.unigrams.tfIdf.svm.model <- svm(x = bbcData.dfm.unigrams.trainingData.tfidf, y = factor(bbcData[bbcData.testingIndex, 1]))
+                bbcData.dfm.unigrams.tfIdf.svm.prediction <- predict(bbcData.dfm.unigrams.tfIdf.svm.model, bbcData.dfm.unigrams.testingData)
+                confusionMatrix(bbcData.dfm.unigrams.svm.prediction, bbcData[bbcData.testingIndex, 1][bbcData.testingIndex])
+        # b) Bigrams
+            # b.1) Term frequency
+                bbcData.dfm.bigrams.svm.model <- svm(x = bbcData.dfm.bigrams.trainingData, y = factor(bbcData[bbcData.testingIndex, 1]))
+                bbcData.dfm.bigrams.svm.prediction <- predict(bbcData.dfm.bigrams.svm.model, bbcData.dfm.bigrams.testingData)
+                confusionMatrix(bbcData.dfm.bigrams.svm.prediction, bbcData[bbcData.testingIndex, 1])
+            # b.2) TfIdf
+                bbcData.dfm.bigrams.tfIdf.svm.model <- svm(x = bbcData.dfm.bigrams.trainingData.tfidf, y = factor(bbcData[bbcData.testingIndex, 1]))
+                bbcData.dfm.bigrams.tfIdf.svm.prediction <- predict(bbcData.dfm.bigrams.tfIdf.svm.model, bbcData.dfm.bigrams.testingData)
+                confusionMatrix(bbcData.dfm.bigrams.tfIdf.svm.prediction, bbcData[bbcData.testingIndex, 1])
+
+# Decision tree:
+    # 1) Summary statistics:
+        bbcData.stats.rpart.model <- rpart(formula = Category ~., data = data.frame(bbcData.stats.trainingData, Category = bbcData[bbcData.trainingIndex, 1]))
+        bbcData.stats.rpart.prediction <- max.col(predict(bbcData.stats.rpart.model, as.data.frame(bbcData.stats.testingData)), ties.method = "first")
+        confusionMatrix(sapply(bbcData.stats.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 2) Document term matrices:
+        # a) Term frequency weighting:
+            bbcData.dtm.rpart.model <- rpart(formula = Category ~., data = data.frame(as.matrix(bbcData.dtm.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+            bbcData.dtm.rpart.prediction <- max.col(predict(bbcData.dtm.rpart.model, data.frame(as.matrix(bbcData.dtm.testingData))), ties.method = "first")
+            confusionMatrix(sapply(bbcData.dtm.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+        # b) TfIdf weighting:
+            bbcData.dtm.tfIdf.rpart.model <- rpart(formula = Category ~ ., data = data.frame(as.matrix(bbcData.dtm.tfIdf.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+            bbcData.dtm.tfIdf.rpart.prediction <- max.col(predict(bbcData.dtm.tfIdf.rpart.model, data.frame(as.matrix(bbcData.dtm.tfIdf.testingData))), ties.method = "first")
+            confusionMatrix(sapply(bbcData.dtm.tfIdf.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 3) Principal components of summary statistics:
+        bbcData.stats.prComp.rpart.model <- rpart(formula = Category ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6, data = data.frame(bbcData.stats.trainingData.prComp, Category = bbcData[bbcData.trainingIndex, 1]))
+        bbcData.stats.prComp.rpart.prediction <- max.col(predict(bbcData.stats.prComp.rpart.model, bbcData.stats.testingData.prComp), ties.method = "first")
+        confusionMatrix(sapply(bbcData.stats.prComp.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 4) Document feature matrices:
+        # a) Unigrams
+            # a.1) Term frequency weighting:
+                bbcData.dfm.rpart.model <- rpart(formula = Category ~., data = data.frame(as.matrix(bbcData.dfm.unigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.rpart.prediction <- max.col(predict(bbcData.dfm.rpart.model, data.frame(as.matrix(bbcData.dfm.unigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.dfm.tfIdf.rpart.model <- rpart(formula = Category ~., data = data.frame(as.matrix(bbcData.dfm.unigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.tfIdf.rpart.prediction <- max.col(predict(bbcData.dfm.tfIdf.rpart.model, data.frame(as.matrix(bbcData.dfm.unigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.tfIdf.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+        # b) Bigrams
+            # b.1) Term frequency weighting
+                bbcData.dfm.rpart.model <- rpart(formula = Category ~ ., data = data.frame(as.matrix(bbcData.dfm.bigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.rpart.prediction <- max.col(predict(bbcData.dfm.rpart.model, data.frame(as.matrix(bbcData.dfm.bigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.dfm.tfIdf.rpart.model <- rpart(formula = Category ~ ., data = data.frame(as.matrix(bbcData.dfm.bigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.tfIdf.rpart.prediction <- max.col(predict(bbcData.dfm.tfIdf.rpart.model, data.frame(as.matrix(bbcData.dfm.bigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.tfIdf.rpart.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+
+# Generalized linear model with logistic regression:
+    # 1) Summary statistics:
+        bbcData.stats.glm.model <- glm(formula = Category ~., family = binomial(link = "logit"), data = data.frame(bbcData.stats.trainingData, Category = bbcData[bbcData.trainingIndex, 1]))
+        bbcData.stats.glm.prediction <- round(predict(bbcData.stats.glm.model, as.data.frame(bbcData.stats.testingData)))
+        bbcData.stats.glm.prediction[which(bbcData.stats.glm.prediction < 1)] <- 1
+        bbcData.stats.glm.prediction[which(bbcData.stats.glm.prediction > 5)] <- 5
+        confusionMatrix(sapply(bbcData.stats.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 2) Document-term matrices:
+            # a) Term frequency weighting:
+                bbcData.dtm.glm.model <- glm(formula = Category ~., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dtm.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dtm.glm.prediction <- round(predict(bbcData.dtm.glm.model, as.data.frame(as.matrix(bbcData.dtm.testingData))))
+                bbcData.dtm.glm.prediction[which(bbcData.dtm.glm.prediction < 1)] <- 1
+                bbcData.dtm.glm.prediction[which(bbcData.dtm.glm.prediction > 5)] <- 5
+                confusionMatrix(sapply(bbcData.dtm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # b) TfIdf weighting:
+                bbcData.dtm.tfIdf.glm.model <- glm(formula = Category ~ ., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dtm.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dtm.tfIdf.glm.prediction <- round(predict(bbcData.dtm.glm.model, as.data.frame(as.matrix(bbcData.dtm.testingData))))
+                bbcData.dtm.tfIdf.glm.prediction[which(bbcData.dtm.glm.prediction < 1)] <- 1
+                bbcData.dtm.tfIdf.glm.prediction[which(bbcData.dtm.glm.prediction > 5)] <- 5
+                confusionMatrix(sapply(bbcData.dtm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 3) Principal components of summary statistics:
+        bbcData.stats.prComp.glm.model <- glm(formula = Category ~ PC1 + PC2 + PC3 + PC4 + PC5 + PC6, family = binomial(link = "logit"), data = data.frame(bbcData.stats.trainingData.prComp, Category = bbcData[bbcData.trainingIndex, 1]))
+        bbcData.stats.prComp.glm.prediction <- round(predict(bbcData.stats.prComp.glm.model, bbcData.stats.testingData.prComp))
+        bbcData.stats.prComp.glm.prediction[which(bbcData.stats.prComp.glm.prediction < 1)] <- 1
+        bbcData.stats.prComp.glm.prediction[which(bbcData.stats.prComp.glm.prediction > 5)] <- 5
+        confusionMatrix(sapply(bbcData.stats.prComp.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+    # 4) Document-feature matrices:
+        # a) Unigrams
+            # a.1) Term frequency weighting:
+                bbcData.dfm.glm.model <- glm(formula = Category ~., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dfm.unigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.glm.prediction <- max.col(predict(bbcData.dfm.glm.model, data.frame(as.matrix(bbcData.dfm.unigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.dfm.tfIdf.glm.model <- glm(formula = Category ~ ., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dfm.unigrams.trainingData.tfidf), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.tfIdf.glm.prediction <- max.col(predict(bbcData.dfm.tfIdf.glm.model, data.frame(as.matrix(bbcData.dfm.unigrams.testingData.tfidf)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # b) Bigrams
+                #b.1) Term frequency weighting
+                bbcData.dfm.glm.model <- glm(formula = Category ~ ., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dfm.bigrams.trainingData), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.glm.prediction <- max.col(predict(bbcData.dfm.glm.model, data.frame(as.matrix(bbcData.dfm.bigrams.testingData)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+            # a.2) TfIdf
+                bbcData.dfm.tfIdf.glm.model <- glm(formula = Category ~ ., family = binomial(link = "logit"), data = data.frame(as.matrix(bbcData.dfm.bigrams.trainingData.tfidf), Category = bbcData[bbcData.trainingIndex, 1]))
+                bbcData.dfm.tfIdf.glm.prediction <- max.col(predict(bbcData.dfm.tfIdf.glm.model, data.frame(as.matrix(bbcData.dfm.bigrams.testingData.tfidf)), ties.method = "first"))
+                confusionMatrix(sapply(bbcData.dfm.glm.prediction, function(x) { categories.factor[x == as.integer(categories.factor)] }), bbcData[bbcData.testingIndex, 1])
+# Neural networks
+# 1) Summary statistics:
+    bbcData.stats.neuralnet.model <- neuralnet(Category.Numerical ~ MeanBigramFreq + MeanTermFreq + MeanWordLength + DistinctWords + WordCounts + CharacterCounts, data = data.frame(bbcData.stats.trainingData, Category.Numerical = bbcData[bbcData.trainingIndex, 1].Numerical), hidden = 2, stepmax = 1e6)
+    bbcData.stats.testingData.neuralnet.prediction <- compute(bbcData.stats.neuralnet.model, bbcData.stats.testingData[,c("MeanBigramFreq", "MeanTermFreq", "MeanWordLength", "DistinctWords", "WordCounts", "CharacterCounts")])
+    bbcData.stats.testingData.neuralnet.prediction.result <- round(bbcData.stats.testingData.neuralnet.prediction$net.result)
+    bbcData.stats.testingData.neuralnet.prediction.result[which(bbcData.stats.testingData.neuralnet.prediction.result < 1)] <- 1
+    bbcData.stats.testingData.neuralnet.prediction.result[which(bbcData.stats.testingData.neuralnet.prediction.result > 5)] <- 5
+    sum(categories.factor[bbcData.stats.testingData.neuralnet.prediction.result] == bbcData[bbcData.testingIndex, 1]) / length(bbcData.testingIndex)
+
+# 3) Principal components of summary statistics:
+    bbcData.stats.prComp.neuralnet.model <- neuralnet(Category.Numerical ~ PC1 + PC2 + PC3, data = data.frame(bbcData.stats.trainingData.prComp, Category.Numerical = bbcData[bbcData.trainingIndex, 1].Numerical), hidden = 2)
+    # Use predicted PCA transformations (from PCA-transformed training data) of testing data statistics for prediction:
+    bbcData.stats.testingData.prComp.neuralnet.prediction <- compute(bbcData.stats.prComp.neuralnet.model, bbcData.stats.testingData.prComp[,c("PC1", "PC2", "PC3")])
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result <- round(bbcData.stats.testingData.prComp.neuralnet.prediction$net.result)
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result[which(bbcData.stats.testingData.prComp.neuralnet.prediction.result < 1)] <- 1
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result[which(bbcData.stats.testingData.prComp.neuralnet.prediction.result > 5)] <- 5
+    sum(categories.factor[bbcData.stats.testingData.prComp.neuralnet.prediction.result] == bbcData[bbcData.testingIndex, 1]) / length(bbcData.testingIndex)
+    # Use PCA-transformed testing data statistics for prediction:
+    bbcData.stats.testingData.prComp.neuralnet.prediction <- compute(bbcData.stats.prComp.neuralnet.model, bbcData.stats.testingData.prComp[, c("PC1", "PC2", "PC3")])
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result <- round(bbcData.stats.testingData.prComp.neuralnet.prediction$net.result)
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result[which(bbcData.stats.testingData.prComp.neuralnet.prediction.result < 1)] <- 1
+    bbcData.stats.testingData.prComp.neuralnet.prediction.result[which(bbcData.stats.testingData.prComp.neuralnet.prediction.result > 5)] <- 5
+    sum(categories.factor[bbcData.stats.testingData.prComp.neuralnet.prediction.result] == bbcData[bbcData.testingIndex, 1]) / length(bbcData.testingIndex)
+
